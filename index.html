@@ -1,0 +1,415 @@
+<!--
+Clean vs Contaminated Recyclables (Teachable Machine) Webpage
+1) In Teachable Machine (Image Project) -> Export Model -> TensorFlow.js -> "Upload my model"
+2) Copy the "share link" or the model folder URL that contains model.json + metadata.json
+3) Paste it into MODEL_BASE_URL below.
+
+If your exported URLs look like:
+https://teachablemachine.withgoogle.com/models/AbCdEfGhI/
+then MODEL_BASE_URL should be exactly that (must end with a slash).
+
+Open this file in a browser (or host it). Some browsers block camera on file://,
+so if webcam doesn’t work, run a local server (instructions at bottom).
+-->
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Recycle Cleanliness Checker</title>
+
+    <!-- Teachable Machine + TFJS -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+
+    <style>
+      body {
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        margin: 24px;
+        max-width: 980px;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+      .card {
+        border: 1px solid #ddd;
+        border-radius: 12px;
+        padding: 14px;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin: 10px 0;
+      }
+      button, input[type="file"] {
+        font-size: 14px;
+      }
+      button {
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid #ccc;
+        background: #f7f7f7;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .status {
+        font-size: 14px;
+        color: #333;
+        margin-top: 6px;
+      }
+      .preview {
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        background: #fafafa;
+        border: 1px dashed #ccc;
+        border-radius: 12px;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+      }
+      .preview img, .preview video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+      }
+      .result {
+        font-size: 18px;
+        margin: 10px 0 6px;
+      }
+      .badge {
+        display: inline-block;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid #ccc;
+        background: #fff;
+        font-weight: 600;
+      }
+      .small {
+        font-size: 13px;
+        color: #555;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 8px;
+        font-size: 14px;
+      }
+      th, td {
+        text-align: left;
+        padding: 8px 6px;
+        border-bottom: 1px solid #eee;
+      }
+      .guidance {
+        margin-top: 10px;
+        padding: 12px;
+        border-radius: 12px;
+        border: 1px solid #ddd;
+        background: #fcfcfc;
+      }
+      .warn {
+        border-color: #e2c27b;
+        background: #fff8e8;
+      }
+      .ok {
+        border-color: #9ed1a8;
+        background: #f0fff3;
+      }
+      .footer {
+        margin-top: 18px;
+        font-size: 12px;
+        color: #666;
+      }
+      @media (max-width: 800px) {
+        .row { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>Recycle Cleanliness Checker</h1>
+    <p class="small">
+      Upload an image (or use webcam) and the model will classify the item as
+      <b>Clean enough to recycle</b> or <b>Food-contaminated</b>.
+    </p>
+
+    <div class="card">
+      <div class="controls">
+        <button id="loadBtn">Load Model</button>
+        <button id="webcamBtn" disabled>Start Webcam</button>
+        <button id="stopWebcamBtn" disabled>Stop Webcam</button>
+        <input id="fileInput" type="file" accept="image/*" disabled />
+      </div>
+      <div id="status" class="status">Model not loaded.</div>
+      <div class="small">
+        Edit <code>MODEL_BASE_URL</code> in the code to your Teachable Machine model URL.
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 18px;">
+      <div class="card">
+        <h2 style="margin-top: 0;">What the model sees</h2>
+        <div class="preview" id="preview">
+          <div class="small">No image yet</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top: 0;">Result</h2>
+        <div class="result">
+          Prediction: <span id="topLabel" class="badge">—</span>
+          <span id="topConf" class="small"></span>
+        </div>
+
+        <div id="guidance" class="guidance">
+          <div class="small">Upload an image or start webcam to see guidance.</div>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Class</th>
+              <th>Confidence</th>
+            </tr>
+          </thead>
+          <tbody id="scores"></tbody>
+        </table>
+
+        <div class="footer">
+          Note: This is a demo classifier. It can be wrong in unusual lighting, backgrounds, or item types.
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // --------------- CONFIG ---------------
+      // Paste your Teachable Machine model base URL here (must end with a slash):
+      // Example: "https://teachablemachine.withgoogle.com/models/AbCdEfGhI/"
+      const MODEL_BASE_URL = "PASTE_YOUR_MODEL_URL_HERE/";
+
+      // User-facing threshold: if top confidence is below this, show "uncertain"
+      const CONFIDENCE_THRESHOLD = 0.70;
+
+      // --------------- STATE ---------------
+      let model = null;
+      let webcam = null;
+      let webcamRunning = false;
+
+      // --------------- DOM ---------------
+      const loadBtn = document.getElementById("loadBtn");
+      const webcamBtn = document.getElementById("webcamBtn");
+      const stopWebcamBtn = document.getElementById("stopWebcamBtn");
+      const fileInput = document.getElementById("fileInput");
+      const statusEl = document.getElementById("status");
+      const previewEl = document.getElementById("preview");
+      const topLabelEl = document.getElementById("topLabel");
+      const topConfEl = document.getElementById("topConf");
+      const scoresEl = document.getElementById("scores");
+      const guidanceEl = document.getElementById("guidance");
+
+      function setStatus(msg) {
+        statusEl.textContent = msg;
+      }
+
+      function clearPreview() {
+        previewEl.innerHTML = '<div class="small">No image yet</div>';
+      }
+
+      function showImagePreview(imgEl) {
+        previewEl.innerHTML = "";
+        previewEl.appendChild(imgEl);
+      }
+
+      function showWebcamPreview(videoEl) {
+        previewEl.innerHTML = "";
+        previewEl.appendChild(videoEl);
+      }
+
+      function setGuidance(label, confidence) {
+        // Normalize label names you might use in Teachable Machine
+        const lower = (label || "").toLowerCase();
+
+        // Decide what to display
+        if (!label || confidence == null) {
+          guidanceEl.className = "guidance";
+          guidanceEl.innerHTML = '<div class="small">Upload an image or start webcam to see guidance.</div>';
+          return;
+        }
+
+        if (confidence < CONFIDENCE_THRESHOLD) {
+          guidanceEl.className = "guidance warn";
+          guidanceEl.innerHTML = `
+            <div><b>Uncertain result</b></div>
+            <div class="small">Try better lighting, a simpler background, or a closer photo of the container.</div>
+          `;
+          return;
+        }
+
+        // You should name your classes something like:
+        // "Clean enough to recycle" and "Food-contaminated"
+        const looksContaminated =
+          lower.includes("contamin") || lower.includes("dirty") || lower.includes("food");
+
+        if (looksContaminated) {
+          guidanceEl.className = "guidance warn";
+          guidanceEl.innerHTML = `
+            <div><b>Action:</b> Rinse and dry before recycling.</div>
+            <div class="small">If residue cannot be removed, dispose as trash to avoid contaminating a full load.</div>
+          `;
+        } else {
+          guidanceEl.className = "guidance ok";
+          guidanceEl.innerHTML = `
+            <div><b>Action:</b> Recycle it.</div>
+            <div class="small">Quick check: no visible residue, mostly dry, no mixed-material parts.</div>
+          `;
+        }
+      }
+
+      function renderScores(predictions) {
+        scoresEl.innerHTML = "";
+        for (const p of predictions) {
+          const tr = document.createElement("tr");
+          const td1 = document.createElement("td");
+          td1.textContent = p.className;
+
+          const td2 = document.createElement("td");
+          td2.textContent = (p.probability * 100).toFixed(1) + "%";
+
+          tr.appendChild(td1);
+          tr.appendChild(td2);
+          scoresEl.appendChild(tr);
+        }
+      }
+
+      async function predictFromElement(el) {
+        if (!model) return;
+
+        const predictions = await model.predict(el);
+        // Sort by probability desc
+        predictions.sort((a, b) => b.probability - a.probability);
+
+        const top = predictions[0];
+        topLabelEl.textContent = top.className;
+        topConfEl.textContent = `(${(top.probability * 100).toFixed(1)}% confidence)`;
+
+        renderScores(predictions);
+        setGuidance(top.className, top.probability);
+      }
+
+      async function loadModel() {
+        if (!MODEL_BASE_URL || MODEL_BASE_URL.includes("PASTE_YOUR_MODEL_URL_HERE")) {
+          setStatus("Please paste your Teachable Machine model URL into MODEL_BASE_URL in the code.");
+          return;
+        }
+
+        setStatus("Loading model...");
+        loadBtn.disabled = true;
+
+        const modelURL = MODEL_BASE_URL + "model.json";
+        const metadataURL = MODEL_BASE_URL + "metadata.json";
+
+        try {
+          model = await tmImage.load(modelURL, metadataURL);
+          setStatus("Model loaded. Upload an image or start webcam.");
+          webcamBtn.disabled = false;
+          fileInput.disabled = false;
+        } catch (err) {
+          console.error(err);
+          setStatus("Failed to load model. Check your MODEL_BASE_URL and that model.json/metadata.json are accessible.");
+          loadBtn.disabled = false;
+        }
+      }
+
+      async function startWebcam() {
+        if (!model) return;
+
+        // Stop if already running
+        if (webcamRunning) return;
+
+        setStatus("Starting webcam...");
+        webcamBtn.disabled = true;
+
+        try {
+          webcam = new tmImage.Webcam(640, 480, true); // width, height, flip
+          await webcam.setup(); // request camera access
+          await webcam.play();
+
+          webcamRunning = true;
+          stopWebcamBtn.disabled = false;
+          fileInput.disabled = true;
+
+          // Show webcam feed
+          showWebcamPreview(webcam.webcam);
+
+          // Loop
+          window.requestAnimationFrame(webcamLoop);
+          setStatus("Webcam running. Hold the item in frame.");
+        } catch (err) {
+          console.error(err);
+          setStatus("Webcam failed to start. If you opened this file directly, try running a local server (see bottom).");
+          webcamBtn.disabled = false;
+        }
+      }
+
+      async function webcamLoop() {
+        if (!webcamRunning) return;
+        webcam.update();
+
+        // Predict on the canvas output from webcam
+        await predictFromElement(webcam.canvas);
+
+        window.requestAnimationFrame(webcamLoop);
+      }
+
+      async function stopWebcam() {
+        if (!webcamRunning) return;
+
+        webcamRunning = false;
+        stopWebcamBtn.disabled = true;
+        fileInput.disabled = false;
+        webcamBtn.disabled = false;
+
+        try {
+          await webcam.stop();
+        } catch (e) {}
+
+        webcam = null;
+        clearPreview();
+        topLabelEl.textContent = "—";
+        topConfEl.textContent = "";
+        scoresEl.innerHTML = "";
+        setGuidance(null, null);
+        setStatus("Webcam stopped. Upload an image or start webcam.");
+      }
+
+      function handleFileUpload(file) {
+        if (!file || !model) return;
+
+        const img = new Image();
+        img.onload = async () => {
+          showImagePreview(img);
+          await predictFromElement(img);
+        };
+        img.src = URL.createObjectURL(file);
+      }
+
+      // --------------- EVENTS ---------------
+      loadBtn.addEventListener("click", loadModel);
+      webcamBtn.addEventListener("click", startWebcam);
+      stopWebcamBtn.addEventListener("click", stopWebcam);
+      fileInput.addEventListener("change", (e) => handleFileUpload(e.target.files?.[0]));
+
+      // --------------- LOCAL SERVER TIP ---------------
+      // If webcam does not work due to browser security:
+      // - macOS/Linux (python):   python3 -m http.server 8000
+      // - Windows (python):       py -m http.server 8000
+      // Then open: http://localhost:8000/ in your browser.
+    </script>
+  </body>
+</html>
